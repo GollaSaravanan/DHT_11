@@ -1,0 +1,183 @@
+<!-- ====== dashboard.html (Apps Script HTML) ====== -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>IoT Dashboard</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <style>
+    :root { --bg:#0f5c56; --card:#ffffff; --text:#122; --muted:#6b7; --crit:#c62828; --warn:#ef6c00; }
+    body { font-family: Inter, Roboto, system-ui, -apple-system, Segoe UI, Arial; background:#f4f7f8; color:var(--text); }
+    header { background:var(--bg); color:#fff; padding:14px 18px; font-weight:600; letter-spacing:.3px; }
+    .wrap { padding:16px; max-width:1200px; margin:0 auto; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+    .card { background:var(--card); border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,.05); padding:14px; }
+    .title { font-size:14px; color:#456; margin-bottom:8px; text-transform:uppercase; letter-spacing:.08em; }
+    .value { font-size:28px; font-weight:700; margin-top:4px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; margin-left:6px; }
+    .pill.crit{ background:#fdecea; color:var(--crit); }
+    .pill.warn{ background:#fff4e5; color:var(--warn); }
+    .mini { color:#678; font-size:12px; margin-top:4px; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { padding:8px 10px; border-bottom:1px solid #eee; white-space:nowrap; }
+    th { text-align:left; color:#567; }
+    .charts { display:grid; grid-template-columns: 1fr; gap:14px; }
+    @media (min-width:880px) { .charts { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <header>Temperature & Humidity Monitoring</header>
+  <div class="wrap">
+
+    <div class="grid" id="cards"></div>
+
+    <div class="charts">
+      <div class="card">
+        <div class="title">Temperature</div>
+        <canvas id="tempChart" height="140"></canvas>
+      </div>
+      <div class="card">
+        <div class="title">Humidity</div>
+        <canvas id="humChart" height="140"></canvas>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:14px;">
+      <div class="card">
+        <div class="title">Lab data (recent)</div>
+        <div class="mini">Auto-refresh every 10s</div>
+        <table id="tbl"><thead><tr><th>Time</th><th>Channel</th><th>Temp (°C)</th><th>Humidity (%)</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <div class="title">Lab Alarms</div>
+        <table id="alarms"><thead><tr><th>Time</th><th>Channel</th><th>Type</th><th>Severity</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Data injected by Apps Script
+    const boot = <?= JSON.stringify(payload) ?>;
+
+    const fmtTime = t => {
+      const d = new Date(t);
+      return d.toLocaleString();
+    };
+
+    function renderCards() {
+      const el = document.getElementById('cards');
+      el.innerHTML = '';
+      const cfg = boot.cfg;
+      Object.keys(boot.current).sort().forEach(ch => {
+        const c = boot.current[ch];
+        const crit = (c.temp >= cfg.high_temp);
+        const warn = (!crit && c.hum <= cfg.low_hum);
+        const pill = crit ? '<span class="pill crit">Critical</span>' :
+                     warn ? '<span class="pill warn">Warning</span>' : '';
+        const html = `
+          <div class="card">
+            <div class="title">Channel ${ch}</div>
+            <div class="value">${c.temp.toFixed(2)} °C ${pill}</div>
+            <div class="mini">Humidity: ${c.hum.toFixed(2)} %</div>
+            <div class="mini">Last update: ${fmtTime(c.t)}</div>
+          </div>`;
+        el.insertAdjacentHTML('beforeend', html);
+      });
+    }
+
+    function lineCfg(label, datasets, color='rgb(33,150,243)') {
+      return {
+        type: 'line',
+        data: { datasets },
+        options: {
+          responsive: true,
+          interaction: { mode: 'nearest', intersect: false },
+          parsing: false,
+          scales: {
+            x: { type: 'time', time: { unit: 'hour' }, ticks: { autoSkip: true } },
+            y: { beginAtZero: false }
+          },
+          plugins: {
+            legend: { position: 'bottom' }
+          }
+        }
+      };
+    }
+
+    function buildDatasets(kind) {
+      // kind: 'temp' or 'hum'
+      const colors = [
+        'rgb(229,57,53)',   // red
+        'rgb(25,118,210)',  // blue
+        'rgb(67,160,71)',   // green
+        'rgb(255,160,0)'    // amber
+      ];
+      const sets = [];
+      Object.keys(boot.series).sort().forEach((ch, i) => {
+        const points = boot.series[ch].map(p => ({ x: p.t, y: (kind==='temp' ? p.temp : p.hum) }));
+        sets.push({
+          label: `Channel ${ch}`,
+          data: points,
+          borderColor: colors[i % colors.length],
+          backgroundColor: colors[i % colors.length],
+          tension: 0.2,
+          pointRadius: 0
+        });
+      });
+      return sets;
+    }
+
+    let tempChart, humChart;
+
+    function renderCharts() {
+      // Load time scale adapter
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3';
+      s.onload = () => {
+        const tctx = document.getElementById('tempChart').getContext('2d');
+        const hctx = document.getElementById('humChart').getContext('2d');
+        tempChart = new Chart(tctx, lineCfg('Temperature', buildDatasets('temp')));
+        humChart  = new Chart(hctx, lineCfg('Humidity', buildDatasets('hum')));
+      };
+      document.head.appendChild(s);
+    }
+
+    function renderTables() {
+      const tbody = document.querySelector('#tbl tbody');
+      tbody.innerHTML = '';
+      const rows = [];
+      Object.keys(boot.series).forEach(ch => {
+        boot.series[ch].slice(-50).reverse().forEach(p => {
+          rows.push({ t:p.t, ch, temp:p.temp, hum:p.hum });
+        });
+      });
+      rows.sort((a,b) => b.t - a.t).slice(0,50).forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${fmtTime(r.t)}</td><td>${r.ch}</td><td>${r.temp.toFixed(2)}</td><td>${r.hum.toFixed(2)}</td>`;
+        tbody.appendChild(tr);
+      });
+
+      const atb = document.querySelector('#alarms tbody');
+      atb.innerHTML = '';
+      boot.alarms.slice(0,50).forEach(a => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${fmtTime(a.time)}</td><td>${a.chan}</td><td>${a.type}</td><td>${a.severity}</td>`;
+        atb.appendChild(tr);
+      });
+    }
+
+    function hydrate() {
+      renderCards();
+      renderCharts();
+      renderTables();
+    }
+
+    // Auto-refresh lightweight: reload page every 10s to fetch fresh data
+    hydrate();
+    setInterval(() => location.reload(), 10000);
+  </script>
+</body>
+</html>
